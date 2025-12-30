@@ -1,0 +1,21 @@
+name: Deploy Pipeline
+on:
+  push:
+    branches: [ main ]
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v3
+      - uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: arn:aws:iam::YOUR_ACCOUNT:role/GitHubActionRole
+          aws-region: us-east-1
+      - uses: hashicorp/setup-terraform@v2
+      - run: terraform init
+        working-directory: ./infra
+      - run: terraform apply -auto-approve -var="domain_name=yourdomain.com"
+        working-directory: ./infra

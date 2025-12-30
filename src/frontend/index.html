@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head><title>HealthTech Secure Ingest</title></head>
+<body>
+    <h1>Secure Patient Data Upload</h1>
+    <p>Supports: PDF, CSV, XLSX, DOCX (Max 5GB)</p>
+    
+    <input type="file" id="f">
+    <button onclick="u()">Upload</button>
+    <pre id="log"></pre>
+
+    <script>
+        const API_URL = "YOUR_API_GATEWAY_URL"; // Fill after Terraform apply
+        
+        async function u() {
+            const f = document.getElementById('f').files[0];
+            const log = document.getElementById('log');
+            log.innerText = "Requesting Access...";
+            
+            // 1. Get Presigned URL
+            const res = await fetch(`${API_URL}/get-url?filename=${f.name}`);
+            const data = await res.json();
+            
+            // 2. Upload Direct to S3 'incoming/'
+            log.innerText = "Uploading...";
+            await fetch(data.upload_url, { method: 'PUT', body: f });
+            
+            log.innerText = "Success! Pipeline Triggered.";
+        }
+    </script>
+</body>
+</html>

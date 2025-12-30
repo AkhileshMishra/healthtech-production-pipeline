@@ -1,0 +1,57 @@
+{
+  "Comment": "HealthTech Unified Pipeline with Guardrails",
+  "StartAt": "DetermineFileType",
+  "States": {
+    "DetermineFileType": {
+      "Type": "Task",
+      "Resource": "${RouterArn}",
+      "Next": "RouterChoice"
+    },
+    "RouterChoice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.mode",
+          "StringEquals": "ASYNC_OCR",
+          "Next": "WaitForTextract" 
+        },
+        {
+          "Variable": "$.mode",
+          "StringEquals": "NATIVE_PARSE",
+          "Next": "SplitContent"
+        }
+      ]
+    },
+    "WaitForTextract": {
+      "Type": "Wait",
+      "Seconds": 15,
+      "Next": "SplitContent"
+    },
+    "SplitContent": {
+      "Type": "Task",
+      "Resource": "${SplitterArn}",
+      "Next": "ParallelAnalysis"
+    },
+    "ParallelAnalysis": {
+      "Type": "Map",
+      "ItemsPath": "$.chunks",
+      "MaxConcurrency": 20,
+      "Iterator": {
+        "StartAt": "GuardrailAndExtract",
+        "States": {
+          "GuardrailAndExtract": {
+            "Type": "Task",
+            "Resource": "${BedrockArn}",
+            "End": true
+          }
+        }
+      },
+      "Next": "AggregateAndIngest"
+    },
+    "AggregateAndIngest": {
+      "Type": "Task",
+      "Resource": "${IngestArn}",
+      "End": true
+    }
+  }
+}
