@@ -208,6 +208,7 @@ resource "aws_lambda_function" "fhir_ingest" {
       BUCKET_NAME        = aws_s3_bucket.data_lake.id
       HEALTHLAKE_DS_ID   = aws_healthlake_fhir_datastore.store.id
       HEALTHLAKE_DS_ARN  = aws_healthlake_fhir_datastore.store.arn
+      HEALTHLAKE_ID      = aws_healthlake_fhir_datastore.store.id
     }
   }
 }
