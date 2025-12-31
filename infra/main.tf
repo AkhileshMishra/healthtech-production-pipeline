@@ -25,7 +25,7 @@ provider "awscc" {
 
 # --- 1. S3 Data Lake (The Entry Point) ---
 resource "aws_s3_bucket" "data_lake" {
-  bucket        = "healthtech-unified-ingest-${var.env}-${random_id.suffix.hex}"
+  bucket        = "healthtech-unified-ingest-${var.env}-${data.aws_caller_identity.current.account_id}"
   force_destroy = true
 }
 
