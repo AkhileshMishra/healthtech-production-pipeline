@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v3
       - uses: aws-actions/configure-aws-credentials@v2
         with:
-          role-to-assume: arn:aws:iam::637423443220:role/GitHubActionRole
+          role-to-assume: arn:aws:iam::637423443220******:role/GitHubActionRole
           aws-region: us-east-1
       - uses: hashicorp/setup-terraform@v2
       - run: terraform init -upgrade
