@@ -128,6 +128,7 @@ resource "aws_sns_topic_subscription" "mime_trigger" {
   topic_arn = aws_sns_topic.new_email.arn
   protocol  = "lambda"
   endpoint  = aws_lambda_function.mime_extractor.arn
+  depends_on = [aws_lambda_permission.sns_invoke_mime]
 }
 
 # --- 5. Lambda Functions ---
