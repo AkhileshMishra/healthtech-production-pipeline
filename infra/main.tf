@@ -16,6 +16,8 @@ provider "aws" {
   region = var.aws_region
 }
 
+data "aws_caller_identity" "current" {}
+
 # ADDED: Configuration for awscc
 provider "awscc" {
   region = var.aws_region
@@ -25,6 +27,32 @@ provider "awscc" {
 resource "aws_s3_bucket" "data_lake" {
   bucket        = "healthtech-unified-ingest-${var.env}-${random_id.suffix.hex}"
   force_destroy = true
+}
+
+resource "aws_s3_bucket_policy" "allow_ses_put_raw_email" {
+  bucket = aws_s3_bucket.data_lake.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowSESPutsToRawEmailPrefix"
+        Effect = "Allow"
+        Principal = {
+          Service = "ses.amazonaws.com"
+        }
+        Action   = "s3:PutObject"
+        Resource = "${aws_s3_bucket.data_lake.arn}/raw_email/*"
+
+        Condition = {
+          StringEquals = {
+            # Common SES->S3 condition used to scope to your AWS account
+            "aws:Referer" = data.aws_caller_identity.current.account_id
+          }
+        }
+      }
+    ]
+  })
 }
 
 resource "random_id" "suffix" { byte_length = 4 }
@@ -88,6 +116,8 @@ resource "aws_ses_receipt_rule" "email_ingest" {
     position          = 1
     topic_arn         = aws_sns_topic.new_email.arn
   }
+
+  depends_on = [aws_s3_bucket_policy.allow_ses_put_raw_email]
 }
 
 resource "aws_sns_topic" "new_email" {
@@ -284,4 +314,9 @@ resource "aws_lambda_permission" "api_gw" {
   function_name = aws_lambda_function.get_presigned_url.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.http_api.execution_arn}/*/*"
+}
+
+# --- Output the URL for your Frontend ---
+output "api_gateway_url" {
+  value = aws_apigatewayv2_api.http_api.api_endpoint
 }
