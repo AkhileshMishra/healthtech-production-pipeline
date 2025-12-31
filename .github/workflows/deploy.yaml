@@ -15,7 +15,7 @@ jobs:
           role-to-assume: arn:aws:iam::637423443220:role/GitHubActionRole
           aws-region: us-east-1
       - uses: hashicorp/setup-terraform@v2
-      - run: terraform init
+      - run: terraform init -upgrade
         working-directory: ./infra
       - run: terraform apply -auto-approve -var="domain_name=aws-workshops.com"
         working-directory: ./infra
