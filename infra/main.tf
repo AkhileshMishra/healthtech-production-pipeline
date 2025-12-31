@@ -4,9 +4,20 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    # ADDED: AWS Cloud Control Provider
+    awscc = {
+      source  = "hashicorp/awscc"
+      version = "~> 1.0"
+    }
   }
 }
+
 provider "aws" {
+  region = var.aws_region
+}
+
+# ADDED: Configuration for awscc
+provider "awscc" {
   region = var.aws_region
 }
 
@@ -18,13 +29,13 @@ resource "aws_s3_bucket" "data_lake" {
 
 resource "random_id" "suffix" { byte_length = 4 }
 
-# Enable EventBridge Notifications (CRITICAL for Event-Driven Architecture)
+# Enable EventBridge Notifications
 resource "aws_s3_bucket_notification" "bucket_notification" {
   bucket      = aws_s3_bucket.data_lake.id
   eventbridge = true
 }
 
-# --- 2. EventBridge Rule (Loop Prevention) ---
+# --- 2. EventBridge Rule ---
 resource "aws_cloudwatch_event_rule" "clean_upload_rule" {
   name        = "trigger-pipeline-clean-${var.env}"
   description = "Triggers ONLY on clean uploads in 'incoming/' prefix"
@@ -34,7 +45,6 @@ resource "aws_cloudwatch_event_rule" "clean_upload_rule" {
     detail = {
       bucket = { name = [aws_s3_bucket.data_lake.id] },
       object = { 
-        # SAFETY: Only triggers on 'incoming/'. Ignores 'raw_email/', 'temp/'
         key = [{ "prefix": "incoming/" }] 
       }
     }
@@ -60,7 +70,7 @@ resource "aws_sfn_state_machine" "pipeline" {
   })
 }
 
-# --- 4. SES Receipt Rule (Email Ingest) ---
+# --- 4. SES Receipt Rule ---
 resource "aws_ses_receipt_rule_set" "main" {
   rule_set_name = "healthtech-rules-${var.env}"
 }
@@ -72,7 +82,6 @@ resource "aws_ses_receipt_rule" "email_ingest" {
   enabled       = true
   scan_enabled  = true
 
-  # Action 1: Dump RAW MIME to 'raw_email/' (EventBridge ignores this)
   s3_action {
     bucket_name       = aws_s3_bucket.data_lake.id
     object_key_prefix = "raw_email/"
@@ -81,7 +90,6 @@ resource "aws_ses_receipt_rule" "email_ingest" {
   }
 }
 
-# SNS Topic to trigger MIME Extractor
 resource "aws_sns_topic" "new_email" {
   name = "new-email-arrival-${var.env}"
 }
@@ -94,7 +102,7 @@ resource "aws_sns_topic_subscription" "mime_trigger" {
 
 # --- 5. Lambda Functions ---
 
-# MIME Extractor Lambda
+# MIME Extractor
 data "archive_file" "mime_extractor_zip" {
   type        = "zip"
   source_dir  = "${path.module}/../src/functions/mime_extractor"
@@ -109,7 +117,6 @@ resource "aws_lambda_function" "mime_extractor" {
   source_code_hash = data.archive_file.mime_extractor_zip.output_base64sha256
   runtime          = "python3.11"
   timeout          = 60
-
   environment {
     variables = {
       BUCKET_NAME = aws_s3_bucket.data_lake.id
@@ -125,7 +132,7 @@ resource "aws_lambda_permission" "sns_invoke_mime" {
   source_arn    = aws_sns_topic.new_email.arn
 }
 
-# Document Router Lambda
+# Document Router
 data "archive_file" "document_router_zip" {
   type        = "zip"
   source_dir  = "${path.module}/../src/functions/document_router"
@@ -140,7 +147,6 @@ resource "aws_lambda_function" "document_router" {
   source_code_hash = data.archive_file.document_router_zip.output_base64sha256
   runtime          = "python3.11"
   timeout          = 60
-
   environment {
     variables = {
       BUCKET_NAME = aws_s3_bucket.data_lake.id
@@ -148,7 +154,7 @@ resource "aws_lambda_function" "document_router" {
   }
 }
 
-# Content Splitter Lambda
+# Content Splitter
 data "archive_file" "content_splitter_zip" {
   type        = "zip"
   source_dir  = "${path.module}/../src/functions/content_splitter"
@@ -163,11 +169,7 @@ resource "aws_lambda_function" "content_splitter" {
   source_code_hash = data.archive_file.content_splitter_zip.output_base64sha256
   runtime          = "python3.11"
   timeout          = 300
-
-  # ATTACH THIS LAYER (Check the ARN for your region: us-east-1 example below)
-  # This provides Pandas and NumPy automatically.
   layers = ["arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python311:12"]
-
   environment {
     variables = {
       BUCKET_NAME = aws_s3_bucket.data_lake.id
@@ -175,7 +177,7 @@ resource "aws_lambda_function" "content_splitter" {
   }
 }
 
-# Bedrock Guardrail Lambda
+# Bedrock Guardrail
 data "archive_file" "bedrock_guardrail_zip" {
   type        = "zip"
   source_dir  = "${path.module}/../src/functions/bedrock_guardrail"
@@ -190,7 +192,6 @@ resource "aws_lambda_function" "bedrock_guardrail" {
   source_code_hash = data.archive_file.bedrock_guardrail_zip.output_base64sha256
   runtime          = "python3.11"
   timeout          = 120
-
   environment {
     variables = {
       BUCKET_NAME      = aws_s3_bucket.data_lake.id
@@ -199,7 +200,7 @@ resource "aws_lambda_function" "bedrock_guardrail" {
   }
 }
 
-# FHIR Ingest Lambda
+# FHIR Ingest (UPDATED TO USE AWSCC)
 data "archive_file" "fhir_ingest_zip" {
   type        = "zip"
   source_dir  = "${path.module}/../src/functions/fhir_ingest"
@@ -218,14 +219,15 @@ resource "aws_lambda_function" "fhir_ingest" {
   environment {
     variables = {
       BUCKET_NAME        = aws_s3_bucket.data_lake.id
-      HEALTHLAKE_DS_ID   = aws_healthlake_fhir_datastore.store.id
-      HEALTHLAKE_DS_ARN  = aws_healthlake_fhir_datastore.store.arn
-      HEALTHLAKE_ID      = aws_healthlake_fhir_datastore.store.id
+      # UPDATED REFERENCES for AWSCC:
+      HEALTHLAKE_DS_ID   = awscc_healthlake_fhir_datastore.store.datastore_id
+      HEALTHLAKE_DS_ARN  = awscc_healthlake_fhir_datastore.store.datastore_arn
+      HEALTHLAKE_ID      = awscc_healthlake_fhir_datastore.store.datastore_id
     }
   }
 }
 
-# Get Presigned URL Lambda
+# Get Presigned URL
 data "archive_file" "get_presigned_url_zip" {
   type        = "zip"
   source_dir  = "${path.module}/../src/functions/get_presigned_url"
@@ -240,7 +242,6 @@ resource "aws_lambda_function" "get_presigned_url" {
   source_code_hash = data.archive_file.get_presigned_url_zip.output_base64sha256
   runtime          = "python3.11"
   timeout          = 30
-
   environment {
     variables = {
       BUCKET_NAME = aws_s3_bucket.data_lake.id
@@ -248,7 +249,7 @@ resource "aws_lambda_function" "get_presigned_url" {
   }
 }
 
-# --- 6. API Gateway (HTTP API) ---
+# --- 6. API Gateway ---
 resource "aws_apigatewayv2_api" "http_api" {
   name          = "healthtech-api-${var.env}"
   protocol_type = "HTTP"
@@ -265,7 +266,6 @@ resource "aws_apigatewayv2_stage" "default" {
   auto_deploy = true
 }
 
-# --- Integration: Connect API to Lambda ---
 resource "aws_apigatewayv2_integration" "lambda_integration" {
   api_id           = aws_apigatewayv2_api.http_api.id
   integration_type = "AWS_PROXY"
@@ -278,7 +278,6 @@ resource "aws_apigatewayv2_route" "get_url_route" {
   target    = "integrations/${aws_apigatewayv2_integration.lambda_integration.id}"
 }
 
-# --- Permission: Allow API GW to invoke Lambda ---
 resource "aws_lambda_permission" "api_gw" {
   statement_id  = "AllowExecutionFromAPIGateway"
   action        = "lambda:InvokeFunction"
@@ -286,5 +285,3 @@ resource "aws_lambda_permission" "api_gw" {
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.http_api.execution_arn}/*/*"
 }
-
-
