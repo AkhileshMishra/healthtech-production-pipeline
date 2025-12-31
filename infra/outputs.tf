@@ -3,7 +3,8 @@ output "s3_bucket_name" {
 }
 
 output "healthlake_endpoint" {
-  value = aws_healthlake_fhir_datastore.store.datastore_endpoint
+  # Updated to use awscc output
+  value = awscc_healthlake_fhir_datastore.store.datastore_endpoint
 }
 
 output "api_gateway_url" {
