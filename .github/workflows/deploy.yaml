@@ -12,10 +12,10 @@ jobs:
       - uses: actions/checkout@v3
       - uses: aws-actions/configure-aws-credentials@v2
         with:
-          role-to-assume: arn:aws:iam::YOUR_ACCOUNT:role/GitHubActionRole
+          role-to-assume: arn:aws:iam::637423443220:role/GitHubActionRole
           aws-region: us-east-1
       - uses: hashicorp/setup-terraform@v2
       - run: terraform init
         working-directory: ./infra
-      - run: terraform apply -auto-approve -var="domain_name=yourdomain.com"
+      - run: terraform apply -auto-approve -var="domain_name=aws-workshops.com"
         working-directory: ./infra
