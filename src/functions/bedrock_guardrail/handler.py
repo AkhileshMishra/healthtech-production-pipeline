@@ -14,7 +14,6 @@ bedrock = boto3.client("bedrock-runtime")
 
 
 def _build_prompt(text_content: str) -> str:
-    # Keep prompt strict to reduce non-JSON output
     return f"""
 You are a Medical Data Compliance Auditor.
 
@@ -24,11 +23,16 @@ or INVALID (Movie Script, Fiction, Code)?
 
 CRITICAL INSTRUCTION:
 Ignore standard legal boilerplate, disclaimer text, or acts/statutes definitions (like Mental Capacity Act)
-if valid clinical patient data is present in the document. Focus on the presence of patient history, diagnosis,
-or medical observations.
+if valid clinical patient data is present in the document. Focus on the presence of patient history,
+diagnosis, or medical observations.
 
 TASK 2: EXTRACT
-If VALID, extract: PatientName, Vitals, Medications.
+If VALID, extract:
+- PatientName
+- PatientIdentifier (NRIC/FIN/Passport; if multiple appear, pick the patient's)
+- Gender (male|female|other|unknown)
+- Vitals (free-text summary)
+- Medications (free-text list)
 
 OUTPUT RULES (VERY IMPORTANT):
 - Output ONLY a single JSON object.
@@ -39,9 +43,11 @@ Required JSON schema:
   "classification": "VALID" | "INVALID",
   "reason": "explanation",
   "entities": {{
-    "PatientName": "...",
-    "Vitals": "...",
-    "Medications": "..."
+    "PatientName": "string|<UNKNOWN>",
+    "PatientIdentifier": "string|<UNKNOWN>",
+    "Gender": "male|female|other|unknown",
+    "Vitals": "string|<UNKNOWN>",
+    "Medications": "string|<UNKNOWN>"
   }}
 }}
 
@@ -51,7 +57,6 @@ INPUT:
 
 
 def _extract_all_text_blocks(bedrock_result: dict) -> str:
-    # Bedrock can return multiple content blocks; join all text blocks safely
     parts = []
     for block in bedrock_result.get("content", []):
         if isinstance(block, dict) and block.get("type") == "text":
@@ -69,7 +74,7 @@ def _parse_json_from_text(raw_text: str) -> dict:
     t = re.sub(r"^\s*```(?:json)?\s*", "", t, flags=re.IGNORECASE)
     t = re.sub(r"\s*```\s*$", "", t)
 
-    # If the model added extra prose, extract the first JSON object
+    # Extract first JSON object if model adds prose
     m = re.search(r"\{.*\}", t, flags=re.DOTALL)
     if m:
         t = m.group(0)
@@ -77,10 +82,33 @@ def _parse_json_from_text(raw_text: str) -> dict:
     return json.loads(t)
 
 
+def _normalize_entities(payload: dict) -> dict:
+    """
+    Ensure entities always contains all keys with safe defaults so downstream mapping is stable.
+    """
+    entities = payload.get("entities") if isinstance(payload, dict) else None
+    if not isinstance(entities, dict):
+        entities = {}
+
+    entities.setdefault("PatientName", "<UNKNOWN>")
+    entities.setdefault("PatientIdentifier", "<UNKNOWN>")
+    entities.setdefault("Gender", "unknown")
+    entities.setdefault("Vitals", "<UNKNOWN>")
+    entities.setdefault("Medications", "<UNKNOWN>")
+
+    # Normalize gender values
+    g = (entities.get("Gender") or "unknown").strip().lower()
+    if g not in {"male", "female", "other", "unknown"}:
+        g = "unknown"
+    entities["Gender"] = g
+
+    payload["entities"] = entities
+    return payload
+
+
 def _try_converse_tool_output(model_id: str, prompt: str) -> dict | None:
     """
-    Best-case path: use Bedrock Converse tool output (structured), so we don't parse a JSON string.
-    If 'converse' isn't available in the runtime's boto3/botocore, return None and fall back.
+    Prefer structured output via Converse tool use (no JSON string parsing).
     """
     if not hasattr(bedrock, "converse"):
         return None
@@ -97,7 +125,17 @@ def _try_converse_tool_output(model_id: str, prompt: str) -> dict | None:
                             "properties": {
                                 "classification": {"type": "string", "enum": ["VALID", "INVALID"]},
                                 "reason": {"type": "string"},
-                                "entities": {"type": "object"},
+                                "entities": {
+                                    "type": "object",
+                                    "properties": {
+                                        "PatientName": {"type": "string"},
+                                        "PatientIdentifier": {"type": "string"},
+                                        "Gender": {"type": "string"},
+                                        "Vitals": {"type": "string"},
+                                        "Medications": {"type": "string"},
+                                    },
+                                    "required": ["PatientName", "PatientIdentifier", "Gender", "Vitals", "Medications"],
+                                },
                             },
                             "required": ["classification", "reason", "entities"],
                         }
@@ -105,7 +143,6 @@ def _try_converse_tool_output(model_id: str, prompt: str) -> dict | None:
                 }
             }
         ],
-        # Force tool use so the model must return structured output
         "toolChoice": {"tool": {"name": "audit_output"}},
     }
 
@@ -123,11 +160,9 @@ def _try_converse_tool_output(model_id: str, prompt: str) -> dict | None:
         content_blocks = resp.get("output", {}).get("message", {}).get("content", [])
         for block in content_blocks:
             if "toolUse" in block and isinstance(block["toolUse"], dict):
-                tool_use = block["toolUse"]
-                tool_input = tool_use.get("input")
+                tool_input = block["toolUse"].get("input")
                 if isinstance(tool_input, dict):
                     return tool_input
-
         return None
 
     except ClientError as e:
@@ -147,7 +182,6 @@ def _invoke_model_text_output(model_id: str, prompt: str) -> dict:
 
     resp = bedrock.invoke_model(modelId=model_id, body=body)
     result = json.loads(resp["body"].read())
-
     raw_text = _extract_all_text_blocks(result)
     return _parse_json_from_text(raw_text)
 
@@ -155,34 +189,30 @@ def _invoke_model_text_output(model_id: str, prompt: str) -> dict:
 def lambda_handler(event, context):
     model_id = os.environ.get("BEDROCK_MODEL_ID", "anthropic.claude-3-5-sonnet-20240620-v1:0")
 
-    # Read chunk from S3
     obj = s3.get_object(Bucket=event["s3_bucket"], Key=event["s3_key"])
     text_content = obj["Body"].read().decode("utf-8")
-    # --- DEBUG: log what was actually read from S3 (safe preview) ---
+
+    # (Optional debug preview—remove in prod if PHI risk)
     preview_head = text_content[:2000]
     preview_tail = text_content[-2000:] if len(text_content) > 2000 else ""
     logger.info("S3 input bucket=%s key=%s bytes=%d", event["s3_bucket"], event["s3_key"], len(text_content))
     logger.info("S3 input HEAD(2000): %s", preview_head)
     logger.info("S3 input TAIL(2000): %s", preview_tail)
-    # --- end debug ---
+
     prompt = _build_prompt(text_content)
 
-    # 1) Prefer structured tool output (no JSON parsing from text).
     parsed_content = _try_converse_tool_output(model_id, prompt)
-
-    # 2) Fallback: invoke_model + robust JSON extraction.
     if parsed_content is None:
         try:
             parsed_content = _invoke_model_text_output(model_id, prompt)
         except Exception as e:
-            # Never fail the Step Function due to JSON formatting drift
             parsed_content = {
                 "classification": "INVALID",
                 "reason": f"Failed to parse model output as JSON: {str(e)}",
                 "entities": {},
             }
 
-    # Pass along metadata
+    parsed_content = _normalize_entities(parsed_content)
     parsed_content["metadata"] = event.get("metadata", {})
 
     return parsed_content
