@@ -158,7 +158,13 @@ def lambda_handler(event, context):
     # Read chunk from S3
     obj = s3.get_object(Bucket=event["s3_bucket"], Key=event["s3_key"])
     text_content = obj["Body"].read().decode("utf-8")
-
+    # --- DEBUG: log what was actually read from S3 (safe preview) ---
+    preview_head = text_content[:2000]
+    preview_tail = text_content[-2000:] if len(text_content) > 2000 else ""
+    logger.info("S3 input bucket=%s key=%s bytes=%d", event["s3_bucket"], event["s3_key"], len(text_content))
+    logger.info("S3 input HEAD(2000): %s", preview_head)
+    logger.info("S3 input TAIL(2000): %s", preview_tail)
+    # --- end debug ---
     prompt = _build_prompt(text_content)
 
     # 1) Prefer structured tool output (no JSON parsing from text).
