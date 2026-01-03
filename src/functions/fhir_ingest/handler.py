@@ -2,22 +2,25 @@ import boto3
 import json
 import uuid
 import os
-from datetime import datetime
+import urllib3
+import botocore.session
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest
 
+# Control-plane client (still useful for describe/import jobs, etc.)
 healthlake = boto3.client("healthlake")
+
+_http = urllib3.PoolManager()
 
 
 def map_entities_to_fhir(entities):
     """Maps the raw AI-extracted entities dictionary into a valid FHIR R4 Patient resource."""
-    # Extract Patient Name safely
     patient_name = entities.get("PatientName", "Unknown Patient")
 
-    # Handle name splitting (First/Last)
     name_parts = patient_name.split()
     family = name_parts[-1] if len(name_parts) > 1 else patient_name
     given = name_parts[:-1] if len(name_parts) > 1 else [patient_name]
 
-    # Create the FHIR Resource
     return {
         "resourceType": "Patient",
         "id": str(uuid.uuid4()),
@@ -36,8 +39,6 @@ def map_entities_to_fhir(entities):
                 "text": patient_name,
             }
         ],
-        # Store other raw entities (Vitals, Meds) in extension or containment if needed
-        # For this workshop, storing the raw dump in 'text.div' (above) is sufficient for visibility.
     }
 
 
@@ -50,93 +51,139 @@ def _is_unknown(v):
 
 
 def _entities_have_signal(entities: dict) -> bool:
-    """
-    Avoid ingesting chunks that are marked VALID but contain no useful extracted info.
-    """
     if not isinstance(entities, dict) or not entities:
         return False
-
-    # If any field is not unknown, treat as signal
     for k in ("PatientName", "Vitals", "Medications"):
         if k in entities and not _is_unknown(entities.get(k)):
             return True
     return False
 
 
+def _is_legal_appendix_chunk(res: dict) -> bool:
+    reason = (res.get("reason") or "").lower()
+    legal_markers = [
+        "mental capacity act",
+        "section 3",
+        "section 4",
+        "section 5",
+        "statute",
+        "legal document",
+        "explanatory notes",
+        "declaration",
+        "duty is to the court",
+        "provisions in sections",
+    ]
+    if not any(m in reason for m in legal_markers):
+        return False
+
+    hard_invalid_markers = ["movie script", "fiction", "screenplay", "source code", "javascript", "python code"]
+    if any(m in reason for m in hard_invalid_markers):
+        return False
+
+    return True
+
+
+def _sigv4_post_to_healthlake(url: str, body_json: dict) -> dict:
+    """
+    HealthLake FHIR Create is a REST POST signed with SigV4. [page:1]
+    """
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if not region:
+        raise ValueError("AWS_REGION is not set")
+
+    body = json.dumps(body_json).encode("utf-8")
+
+    session = botocore.session.get_session()
+    creds = session.get_credentials()
+    if creds is None:
+        raise ValueError("No AWS credentials available for SigV4 signing")
+    frozen = creds.get_frozen_credentials()
+
+    req = AWSRequest(
+        method="POST",
+        url=url,
+        data=body,
+        headers={
+            "Content-Type": "application/fhir+json",
+            "Accept": "application/json",
+        },
+    )
+    SigV4Auth(frozen, "healthlake", region).add_auth(req)
+    prepared = req.prepare()
+
+    resp = _http.request(
+        "POST",
+        url,
+        body=body,
+        headers=dict(prepared.headers),
+        retries=False,
+        timeout=urllib3.Timeout(connect=5.0, read=30.0),
+    )
+
+    resp_text = resp.data.decode("utf-8") if resp.data else ""
+    if resp.status not in (200, 201):
+        raise Exception(f"HealthLake FHIR create failed status={resp.status} body={resp_text}")
+
+    return json.loads(resp_text) if resp_text else {}
+
+
+def _healthlake_fhir_create(datastore_id: str, resource: dict) -> dict:
+    # Per AWS docs: POST https://healthlake.{region}.amazonaws.com/datastore/{datastoreId}/r4/{ResourceType} [page:1]
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    resource_type = resource.get("resourceType")
+    if not resource_type:
+        raise ValueError("FHIR resource missing resourceType")
+
+    url = f"https://healthlake.{region}.amazonaws.com/datastore/{datastore_id}/r4/{resource_type}"
+    return _sigv4_post_to_healthlake(url, resource)
+
+
 def lambda_handler(event, context):
-    # Event is LIST of results from Map State
     results = event if isinstance(event, list) else []
 
-    # --- FIX START: Smart Aggregation Logic ---
     valid_results = [r for r in results if r.get("classification") == "VALID"]
     invalid_results = [r for r in results if r.get("classification") == "INVALID"]
 
-    # If we found NO valid chunks at all, then it's a truly invalid file.
     if not valid_results:
-        reason = (
-            invalid_results[0].get("reason", "No valid medical content found in any chunk.")
-            if invalid_results
-            else "No valid medical content found in any chunk."
-        )
-        print(f"SECURITY BLOCK: File rejected. Reason: {reason}")
+        reason = invalid_results[0].get("reason", "No valid medical content found.") if invalid_results else "Empty input"
         return {"status": "REJECTED", "reason": reason}
 
-    print(
-        f"Processing {len(valid_results)} valid chunks. Ignored {len(invalid_results)} invalid/boilerplate chunks."
-    )
+    legal_appendix = [r for r in invalid_results if _is_legal_appendix_chunk(r)]
+    hard_invalid = [r for r in invalid_results if r not in legal_appendix]
 
-    # Use metadata from the first VALID chunk (safer than using possibly-invalid chunk[0])
+    # Optional: keep rejecting if "hard invalid" exists
+    if hard_invalid:
+        reason = hard_invalid[0].get("reason", "Contains invalid content.")
+        return {"status": "REJECTED", "reason": reason}
+
+    # Continue using only VALID chunks (ignore legal appendix chunks)
     metadata = valid_results[0].get("metadata", {}) if valid_results else {}
-    # --- FIX END ---
-
     source_agent = metadata.get("sender", "Web Upload")
-    print(f"Ingesting clean data verified from source: {source_agent}")
 
-    # Construct FHIR Entries (only from VALID chunks with usable entities)
     entries = []
-
     for res in valid_results:
         entities = res.get("entities", {})
-
-        # Skip VALID chunks that extracted nothing useful (prevents noisy duplicates)
         if not _entities_have_signal(entities):
             continue
 
-        # Map entities to FHIR if needed
         if "fhir_resource" not in res:
-            print("Detected raw entities. Mapping to FHIR Patient resource...")
             res["fhir_resource"] = map_entities_to_fhir(entities)
 
-        if "fhir_resource" in res:
-            entries.append(
-                {
-                    "resource": res["fhir_resource"],
-                    "request": {
-                        "method": "POST",
-                        "url": res["fhir_resource"]["resourceType"],
-                    },
-                }
-            )
+        entries.append(res["fhir_resource"])
 
     if not entries:
-        print("No FHIR resources generated (valid chunks contained no mapped entities).")
         return {"status": "SKIPPED", "reason": "No entities extracted"}
 
-    # ACTUAL WRITE TO HEALTHLAKE
-    try:
-        success_count = 0
-        for entry in entries:
-            # Using create_resource loop for workshop reliability
-            healthlake.create_resource(
-                DatastoreId=os.environ["HEALTHLAKE_ID"],
-                Resource=json.dumps(entry["resource"]),
-            )
-            success_count += 1
+    datastore_id = os.environ["HEALTHLAKE_ID"]
 
-        print(f"Successfully ingested {success_count} resources into HealthLake.")
+    success_count = 0
+    for resource in entries:
+        _healthlake_fhir_create(datastore_id, resource)
+        success_count += 1
 
-    except Exception as e:
-        print(f"Error writing to HealthLake: {str(e)}")
-        raise e
-
-    return {"status": "SUCCESS", "items_processed": success_count}
+    return {
+        "status": "SUCCESS",
+        "items_processed": success_count,
+        "source_agent": source_agent,
+        "ignored_legal_chunks": len(legal_appendix),
+    }
