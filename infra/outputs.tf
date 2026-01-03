@@ -20,5 +20,5 @@ output "api_base_url" {
 }
 
 output "dashboard_url" {
-  value = "http://${aws_s3_bucket.dashboard_site.bucket}.s3-website-${var.aws_region}.amazonaws.com"
+  value = "${aws_apigatewayv2_api.http_api.api_endpoint}/dashboard"
 }
