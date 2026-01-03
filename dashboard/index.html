@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>HealthTech Patient Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; }
+    input { width: 420px; padding: 8px; }
+    button { padding: 8px 12px; margin-left: 6px; }
+    pre { background: #f6f6f6; padding: 12px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <h2>Patient Dashboard (Demo)</h2>
+
+  <div>
+    <label>API Base URL:</label>
+    <input id="apiBase" placeholder="Paste Terraform output api_base_url here" />
+  </div>
+
+  <h3>Search by identifier</h3>
+  <div>
+    <input id="identifier" placeholder='urn:healthtech:patient-identifier|S1111111X' />
+    <button onclick="search()">Search</button>
+  </div>
+
+  <h3>Result</h3>
+  <pre id="out">—</pre>
+
+  <script>
+    async function search() {
+      const apiBase = document.getElementById('apiBase').value.replace(/\/$/, '');
+      const identifier = document.getElementById('identifier').value.trim();
+
+      const url = `${apiBase}/patients?identifier=${encodeURIComponent(identifier)}&_total=accurate&_count=20`;
+      const res = await fetch(url);
+      const data = await res.json();
+      document.getElementById('out').textContent = JSON.stringify(data, null, 2);
+    }
+  </script>
+</body>
+</html>

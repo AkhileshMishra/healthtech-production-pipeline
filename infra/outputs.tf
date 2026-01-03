@@ -14,3 +14,11 @@ output "api_gateway_url" {
 output "step_function_arn" {
   value = aws_sfn_state_machine.pipeline.arn
 }
+
+output "api_base_url" {
+  value = aws_apigatewayv2_api.http_api.api_endpoint
+}
+
+output "dashboard_url" {
+  value = "http://${aws_s3_bucket.dashboard_site.bucket}.s3-website-${var.aws_region}.amazonaws.com"
+}
