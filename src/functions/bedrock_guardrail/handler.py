@@ -16,7 +16,10 @@ def lambda_handler(event, context):
     You are a Medical Data Compliance Auditor.
     
     TASK 1: CLASSIFY
-    Analyze the text. Is it Valid Medical Record (Notes, Labs, Referral) or INVALID (Movie Script, Fiction, Code)?
+    Analyze the text. Is it a Valid Medical Record (Notes, Labs, Referral, Medical Reports for Legal Assessment) or INVALID (Movie Script, Fiction, Code)?
+    
+    CRITICAL INSTRUCTION:
+    Ignore standard legal boilerplate, disclaimer text, or acts/statutes definitions (like Mental Capacity Act) if valid clinical patient data is present in the document. Focus on the presence of patient history, diagnosis, or medical observations.
     
     TASK 2: EXTRACT
     If VALID, extract: PatientName, Vitals, Medications.
